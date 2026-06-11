@@ -7,10 +7,27 @@ import math
 import os
 import sys
 import tempfile
+import types
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+def _ensure_boltz_import_deps() -> None:
+    """Nova's Boltz fork imports bittensor only for logging; stub it if missing."""
+    try:
+        import bittensor  # type: ignore  # noqa: F401
+    except ImportError:
+        bt = types.ModuleType("bittensor")
+
+        class _BtLogging:
+            @staticmethod
+            def error(message: str) -> None:
+                print(message, file=sys.stderr)
+
+        bt.logging = _BtLogging()
+        sys.modules["bittensor"] = bt
 
 
 def _mock_score(molecule_id: str, smiles: str, target_name: str) -> float:
@@ -65,6 +82,7 @@ def _extract_score_from_output_dir(out_dir: Path) -> float:
 
 
 def _run_boltz_predict(input_dir: Path, output_dir: Path, cache_dir: str) -> None:
+    _ensure_boltz_import_deps()
     try:
         from boltz.main import predict  # type: ignore
     except Exception:
@@ -109,6 +127,7 @@ def _run_boltz_predict(input_dir: Path, output_dir: Path, cache_dir: str) -> Non
 
 
 def main() -> int:
+    _ensure_boltz_import_deps()
     parser = argparse.ArgumentParser(description="Boltz2 single-molecule scorer.")
     parser.add_argument("--smiles", required=True)
     parser.add_argument("--molecule-id", required=True)
