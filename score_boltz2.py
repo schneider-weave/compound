@@ -113,19 +113,19 @@ def _select_accelerator() -> str:
 
 
 def _ensure_boltz_import_deps() -> None:
-    """Nova's Boltz fork imports bittensor only for logging; stub it if missing."""
-    try:
-        import bittensor  # type: ignore  # noqa: F401
-    except ImportError:
-        bt = types.ModuleType("bittensor")
+    """Nova's Boltz fork imports bittensor only for logging; stub it for this CLI."""
+    if "bittensor" in sys.modules:
+        return
 
-        class _BtLogging:
-            @staticmethod
-            def error(message: str) -> None:
-                print(message, file=sys.stderr)
+    bt = types.ModuleType("bittensor")
 
-        bt.logging = _BtLogging()
-        sys.modules["bittensor"] = bt
+    class _BtLogging:
+        @staticmethod
+        def error(message: str) -> None:
+            print(message, file=sys.stderr)
+
+    bt.logging = _BtLogging()
+    sys.modules["bittensor"] = bt
 
 
 def _mock_score(molecule_id: str, smiles: str, target_name: str) -> float:
@@ -224,8 +224,6 @@ def _run_boltz_predict(input_dir: Path, output_dir: Path, cache_dir: str) -> Non
 
 
 def main() -> int:
-    _ensure_boltz_import_deps()
-    _prepare_torch_runtime()
     parser = argparse.ArgumentParser(description="Boltz2 single-molecule scorer.")
     parser.add_argument("--smiles", required=True)
     parser.add_argument("--molecule-id", required=True)
@@ -239,6 +237,9 @@ def main() -> int:
         help="Fail without emitting a score when Boltz inference fails.",
     )
     args = parser.parse_args()
+
+    _ensure_boltz_import_deps()
+    _prepare_torch_runtime()
 
     target = _load_target(args)
     target_name = str(target.get("name", args.target_name or "target"))
