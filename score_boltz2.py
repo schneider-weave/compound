@@ -14,6 +14,104 @@ from typing import Any
 import yaml
 
 
+def _patch_torch_checkpoint_loaders() -> None:
+    """Boltz/Lightning checkpoints need full pickle (omegaconf); PyTorch 2.6+ defaults to weights_only=True."""
+    try:
+        import torch  # type: ignore
+
+        if getattr(torch.load, "_molsearch_patched", False):
+            return
+
+        original_load = torch.load
+
+        def trusted_load(*args: Any, **kwargs: Any) -> Any:
+            kwargs["weights_only"] = False
+            return original_load(*args, **kwargs)
+
+        trusted_load._molsearch_patched = True  # type: ignore[attr-defined]
+        torch.load = trusted_load  # type: ignore[assignment]
+        if hasattr(torch, "serialization") and hasattr(torch.serialization, "load"):
+            torch.serialization.load = trusted_load  # type: ignore[attr-defined]
+
+        try:
+            from omegaconf import DictConfig, ListConfig  # type: ignore
+            from omegaconf.base import ContainerMetadata  # type: ignore
+
+            if hasattr(torch.serialization, "add_safe_globals"):
+                torch.serialization.add_safe_globals([DictConfig, ListConfig, ContainerMetadata])
+        except Exception:
+            pass
+
+        for module_name in (
+            "lightning.fabric.utilities.load",
+            "lightning.pytorch.utilities.migration.utils",
+            "pytorch_lightning.utilities.migration.utils",
+        ):
+            try:
+                module = __import__(module_name, fromlist=["_load"])
+                if hasattr(module, "_load"):
+                    original_pl_load = module._load
+
+                    def trusted_pl_load(*args: Any, _orig: Any = original_pl_load, **kwargs: Any) -> Any:
+                        kwargs["weights_only"] = False
+                        return _orig(*args, **kwargs)
+
+                    module._load = trusted_pl_load
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def _prepare_torch_runtime() -> None:
+    _patch_torch_checkpoint_loaders()
+
+
+def _boltz_src_path() -> Path | None:
+    local_boltz_src = (
+        Path(__file__).resolve().parent / "third_party" / "nova" / "external_tools" / "boltz" / "src"
+    )
+    return local_boltz_src if local_boltz_src.exists() else None
+
+
+def _import_boltz_predict() -> Any:
+    boltz_src = _boltz_src_path()
+    if boltz_src is not None:
+        sys.path.insert(0, str(boltz_src))
+    from boltz.main import predict  # type: ignore
+
+    return predict
+
+
+def _select_accelerator() -> str:
+    try:
+        import torch  # type: ignore
+    except Exception:
+        return "cpu"
+
+    if not torch.cuda.is_available():
+        return "cpu"
+
+    major, minor = torch.cuda.get_device_capability(0)
+    if major >= 12:
+        arch_list: list[str] = []
+        if hasattr(torch.cuda, "get_arch_list"):
+            try:
+                arch_list = list(torch.cuda.get_arch_list())
+            except Exception:
+                arch_list = []
+        has_sm120 = any("12.0" in arch or "sm_120" in arch for arch in arch_list)
+        if not has_sm120:
+            device_name = torch.cuda.get_device_name(0)
+            raise RuntimeError(
+                f"{device_name} (sm_{major}{minor}) is not supported by this PyTorch build. "
+                "Install PyTorch >=2.7 with CUDA 12.8, then pin numpy for Boltz:\n"
+                "  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128\n"
+                "  pip install --force-reinstall --no-deps numpy==1.26.4"
+            )
+    return "gpu"
+
+
 def _ensure_boltz_import_deps() -> None:
     """Nova's Boltz fork imports bittensor only for logging; stub it if missing."""
     try:
@@ -83,21 +181,13 @@ def _extract_score_from_output_dir(out_dir: Path) -> float:
 
 def _run_boltz_predict(input_dir: Path, output_dir: Path, cache_dir: str) -> None:
     _ensure_boltz_import_deps()
-    try:
-        from boltz.main import predict  # type: ignore
-    except Exception:
-        local_boltz_src = (
-            Path(__file__).resolve().parent / "third_party" / "nova" / "external_tools" / "boltz" / "src"
-        )
-        if local_boltz_src.exists():
-            sys.path.insert(0, str(local_boltz_src))
-        from boltz.main import predict  # type: ignore
+    _prepare_torch_runtime()
+    predict = _import_boltz_predict()
 
-    accelerator = "cpu"
     try:
-        import torch  # type: ignore
-
-        accelerator = "gpu" if torch.cuda.is_available() else "cpu"
+        accelerator = _select_accelerator()
+    except RuntimeError:
+        raise
     except Exception:
         accelerator = "cpu"
 
@@ -128,6 +218,7 @@ def _run_boltz_predict(input_dir: Path, output_dir: Path, cache_dir: str) -> Non
 
 def main() -> int:
     _ensure_boltz_import_deps()
+    _prepare_torch_runtime()
     parser = argparse.ArgumentParser(description="Boltz2 single-molecule scorer.")
     parser.add_argument("--smiles", required=True)
     parser.add_argument("--molecule-id", required=True)
