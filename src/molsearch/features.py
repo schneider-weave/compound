@@ -10,11 +10,22 @@ from sklearn.feature_extraction import FeatureHasher
 
 try:
     from rdkit import Chem
-    from rdkit.Chem import AllChem
+    from rdkit import RDLogger
+    from rdkit.Chem.rdFingerprintGenerator import GetMorganGenerator
 
     RDKit_AVAILABLE = True
 except Exception:  # pragma: no cover
     RDKit_AVAILABLE = False
+
+_MORGAN_GENERATORS: dict[int, object] = {}
+
+
+def _get_morgan_generator(n_bits: int):
+    generator = _MORGAN_GENERATORS.get(n_bits)
+    if generator is None:
+        generator = GetMorganGenerator(radius=2, fpSize=n_bits)
+        _MORGAN_GENERATORS[n_bits] = generator
+    return generator
 
 
 def _smiles_descriptors(smiles: str) -> dict[str, float]:
@@ -63,12 +74,15 @@ def _rdkit_morgan_features(smiles_list: Iterable[str], n_bits: int = 256) -> spa
     smiles_vals = list(smiles_list)
     if not RDKit_AVAILABLE:
         return sparse.csr_matrix((len(smiles_vals), 0))
+    # Silence deprecated fingerprint warnings from legacy APIs in downstream stacks.
+    RDLogger.DisableLog("rdApp.warning")
     arr = np.zeros((len(smiles_vals), n_bits), dtype=np.float32)
+    generator = _get_morgan_generator(n_bits)
     for i, smi in enumerate(smiles_vals):
         mol = Chem.MolFromSmiles(smi)
         if mol is None:
             continue
-        fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=n_bits)
+        fp = generator.GetFingerprint(mol)
         on_bits = list(fp.GetOnBits())
         arr[i, on_bits] = 1.0
     return sparse.csr_matrix(arr)

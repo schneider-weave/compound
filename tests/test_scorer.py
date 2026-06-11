@@ -34,3 +34,17 @@ def test_command_mode_without_target_returns_nan() -> None:
         target={},
     )
     assert math.isnan(scorer.score("rxn:2:1:2", "CCO"))
+
+
+def test_extract_score_from_noisy_output_prefers_labeled_score() -> None:
+    output = """
+    [14:09:28] DEPRECATION WARNING: please use MorganGenerator
+    some progress text 223.79it/s
+    score: 0.1234
+    """
+    assert BoltzScorer._extract_score(output) == 0.1234
+
+
+def test_extract_score_from_nested_json_affinity_key() -> None:
+    output = '{"result": {"affinity_pred_value": 1.2345, "other": 0}}'
+    assert BoltzScorer._extract_score(output) == 1.2345

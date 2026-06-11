@@ -12,6 +12,11 @@ from dataclasses import dataclass
 
 SCORE_PATTERNS = [
     re.compile(r"score\s*[:=]\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", re.IGNORECASE),
+    re.compile(r"final_score\s*[:=]\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", re.IGNORECASE),
+    re.compile(
+        r"affinity_(?:pred_value|probability_binary)\s*[:=]\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)",
+        re.IGNORECASE,
+    ),
 ]
 
 
@@ -81,6 +86,32 @@ class BoltzScorer:
         return round(float(value), 6)
 
     @staticmethod
+    def _extract_numeric_from_json(payload: object) -> float | None:
+        priority_keys = (
+            "score",
+            "final_score",
+            "affinity_pred_value",
+            "affinity_probability_binary",
+            "affinity_pred_value1",
+            "affinity_probability_binary1",
+        )
+        if isinstance(payload, Mapping):
+            for key in priority_keys:
+                value = payload.get(key)
+                if isinstance(value, (int, float)):
+                    return float(value)
+            for value in payload.values():
+                extracted = BoltzScorer._extract_numeric_from_json(value)
+                if extracted is not None:
+                    return extracted
+        if isinstance(payload, list):
+            for value in payload:
+                extracted = BoltzScorer._extract_numeric_from_json(value)
+                if extracted is not None:
+                    return extracted
+        return None
+
+    @staticmethod
     def _extract_score(output: str) -> float:
         text = output.strip()
         if not text:
@@ -89,8 +120,9 @@ class BoltzScorer:
         # Try JSON first.
         try:
             parsed = json.loads(text)
-            if isinstance(parsed, dict) and "score" in parsed:
-                return float(parsed["score"])
+            extracted = BoltzScorer._extract_numeric_from_json(parsed)
+            if extracted is not None:
+                return extracted
         except Exception:
             pass
 
@@ -108,5 +140,13 @@ class BoltzScorer:
                 return float(line)
             except ValueError:
                 continue
+
+        # Last resort: find the last standalone numeric token.
+        numbers = re.findall(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", text)
+        if numbers:
+            try:
+                return float(numbers[-1])
+            except ValueError:
+                return math.nan
 
         return math.nan

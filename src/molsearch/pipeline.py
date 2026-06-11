@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from time import perf_counter
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -17,6 +18,11 @@ from .history import (
 from .molecule_id import add_parsed_columns
 from .scorer import BoltzScorer
 from .selector import select_batch
+
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover
+    tqdm = None
 
 
 def _canonicalize_molecule_id(raw_id: str, cfg: AppConfig) -> str:
@@ -128,7 +134,11 @@ def _score_batch(selected: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
     def _to_int_or_nan(value):
         return int(value) if pd.notna(value) else np.nan
 
-    for _, row in selected.iterrows():
+    iterator = selected.iterrows()
+    if tqdm is not None:
+        iterator = tqdm(iterator, total=len(selected), dynamic_ncols=True)
+
+    for _, row in iterator:
         molecule_id = str(row["molecule_id"])
         smiles = str(row["smiles"])
         score = scorer.score(molecule_id, smiles)
@@ -154,6 +164,55 @@ def _score_batch(selected: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
 
     scored_df = pd.DataFrame(rows)
     return scored_df
+
+
+def _mode_label(cfg: AppConfig) -> str:
+    method = cfg.selection.method.strip().lower()
+    if method == "active_search":
+        return "DJA+TABU"
+    model = cfg.selection.model.strip().upper()
+    return f"{cfg.selection.method.upper()}+{model}"
+
+
+def _pool_entropy(selected: pd.DataFrame) -> float:
+    param_cols = [c for c in ["p1", "p2", "p3"] if c in selected.columns]
+    if not param_cols:
+        if "smiles" not in selected.columns or selected.empty:
+            return 0.0
+        probs = selected["smiles"].astype(str).value_counts(normalize=True)
+    else:
+        tuples = selected[param_cols].astype(str).agg("|".join, axis=1)
+        probs = tuples.value_counts(normalize=True)
+    if probs.empty:
+        return 0.0
+    entropy = -(probs * np.log2(probs)).sum()
+    return float(entropy)
+
+
+def _pool_score_stats(selected: pd.DataFrame) -> tuple[float, float, float]:
+    if "pred_score" in selected.columns:
+        values = pd.to_numeric(selected["pred_score"], errors="coerce").dropna()
+        if not values.empty:
+            return float(values.mean()), float(values.max()), _pool_entropy(selected)
+    if "acquisition" in selected.columns:
+        values = pd.to_numeric(selected["acquisition"], errors="coerce").dropna()
+        if not values.empty:
+            return float(values.mean()), float(values.max()), _pool_entropy(selected)
+    return 0.0, 0.0, _pool_entropy(selected)
+
+
+def _print_iteration_progress(
+    iteration: int,
+    iteration_elapsed_sec: float,
+    total_elapsed_sec: float,
+    cfg: AppConfig,
+    selected: pd.DataFrame,
+) -> None:
+    avg, max_v, ent = _pool_score_stats(selected)
+    print(
+        f"Iteration {iteration} | {iteration_elapsed_sec:.1f}s | Total: {int(total_elapsed_sec)}s "
+        f"| Mode: {_mode_label(cfg)} | Pool: avg={avg:.4f} max={max_v:.4f} ent={ent:.3f}"
+    )
 
 
 def _print_summary(
@@ -192,8 +251,14 @@ def _print_summary(
         )
 
 
-def _run_single_iteration(cfg: AppConfig, iteration: int, dry_run: bool = False) -> pd.DataFrame:
+def _run_single_iteration(
+    cfg: AppConfig,
+    iteration: int,
+    run_started_at: float | None = None,
+    dry_run: bool = False,
+) -> pd.DataFrame:
     cfg.search.iteration = iteration
+    iter_started_at = perf_counter()
 
     candidates, history_df = _prepare_candidates(cfg)
     selected = select_batch(candidates, history_df, cfg)
@@ -204,6 +269,17 @@ def _run_single_iteration(cfg: AppConfig, iteration: int, dry_run: bool = False)
             print(molecule_id)
         return selected
 
+    elapsed_before_scoring = perf_counter() - iter_started_at
+    total_elapsed_before_scoring = (
+        perf_counter() - run_started_at if run_started_at is not None else elapsed_before_scoring
+    )
+    _print_iteration_progress(
+        iteration=iteration,
+        iteration_elapsed_sec=elapsed_before_scoring,
+        total_elapsed_sec=total_elapsed_before_scoring,
+        cfg=cfg,
+        selected=selected,
+    )
     scored_df = _score_batch(selected, cfg)
 
     save_iteration_results(
@@ -237,7 +313,13 @@ def _run_single_iteration(cfg: AppConfig, iteration: int, dry_run: bool = False)
 def run_iteration(config_path: str, dry_run: bool = False) -> pd.DataFrame:
     cfg = load_config(config_path)
     if dry_run or not cfg.run_control.enabled:
-        return _run_single_iteration(cfg, iteration=cfg.search.iteration, dry_run=dry_run)
+        single_run_started = perf_counter()
+        return _run_single_iteration(
+            cfg,
+            iteration=cfg.search.iteration,
+            run_started_at=single_run_started,
+            dry_run=dry_run,
+        )
 
     start_iter = cfg.search.iteration
     patience = max(cfg.run_control.patience, 1)
@@ -246,10 +328,16 @@ def run_iteration(config_path: str, dry_run: bool = False) -> pd.DataFrame:
     last_avg = -np.inf
     last_best = -np.inf
     last_scored = pd.DataFrame()
+    run_started_at = perf_counter()
 
     for i in range(max_iterations):
         iteration = start_iter + i
-        scored_df = _run_single_iteration(cfg, iteration=iteration, dry_run=False)
+        scored_df = _run_single_iteration(
+            cfg,
+            iteration=iteration,
+            run_started_at=run_started_at,
+            dry_run=False,
+        )
         last_scored = scored_df
 
         valid_scores = pd.to_numeric(scored_df.get("final_score"), errors="coerce").dropna()
