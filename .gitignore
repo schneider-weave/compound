@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Large/runtime artifacts
+third_party/
+data/boltz-cache/
+data/*.ckpt
+data/*.tar
+
+# Local run outputs
+config.mock.yaml
+config.user-mock.yaml

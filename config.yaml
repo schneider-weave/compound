@@ -1,0 +1,38 @@
+search:
+  rxn: 1
+  fixed_params:
+    1: 60111
+  batch_size: 60
+  iteration: 1
+
+files:
+  molecules_sqlite: "data/molecules.sqlite"
+  origin_results: "data/nova_results_Molecules_RXN1.csv"
+  my_new_results: "data/my_results_rxn{rxn}.csv"
+
+duplicate_filter:
+  avoid_molecule_id: true
+  avoid_smiles: true
+
+selection:
+  method: "active_search"
+  beta: 1.2
+  exploit_count: 40
+  ucb_count: 15
+  explore_count: 5
+  min_training_rows: 30
+  random_seed: 42
+  model: "extra_trees"
+
+scoring:
+  mode: "command"
+  command_template: "env BOLTZ_CACHE=data/boltz-cache python score_boltz2.py --smiles '{smiles}' --molecule-id '{molecule_id}' --target-json '{target_json}'"
+  target:
+    name: "example_target"
+    sequence: "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQANL"
+  timeout_seconds: 3600
+  mock_score: false
+
+results:
+  sort_by: "final_score"
+  sort_order: "desc"

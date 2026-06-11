@@ -1,0 +1,208 @@
+# Molecule Active Search
+
+Compute-efficient molecule search pipeline that prioritizes high-value candidates while minimizing expensive Boltz-2 scoring runs.
+
+## Goal
+
+Given a large `molecules.sqlite` pool, this project runs **Duplicate-Aware Anchored Active Search** to quickly find top-scoring molecules for a specific reaction family and fixed parameter setting.
+
+It avoids wasted compute by:
+- filtering to only the configured reaction/anchor parameters,
+- skipping already scored molecule IDs,
+- optionally skipping duplicate SMILES,
+- using active learning (exploit + UCB + exploration) rather than random search.
+
+## Project Layout
+
+- `config.yaml`: search/scoring/configuration
+- `data/molecules.sqlite`: source molecule database
+- `data/nova_results_Molecules_RXN1.csv`: origin/history results
+- `data/my_results_rxn{rxn}.csv`: your new scored rows (reaction-specific)
+- `src/molsearch/`: pipeline implementation
+- `tests/`: unit tests
+
+## Installation
+
+```bash
+cd molecule-active-search
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .[dev]
+```
+
+Optional extras:
+
+```bash
+pip install -e .[catboost]
+pip install -e .[rdkit]
+```
+
+## Download Required Assets
+
+Download dataset:
+
+```bash
+curl -L "https://huggingface.co/datasets/Metanova/Mol-Rxn-DB/resolve/main/molecules.sqlite" -o data/molecules.sqlite
+```
+
+Download Metanova Boltz tool code:
+
+```bash
+mkdir -p third_party
+git clone --filter=blob:none --sparse https://github.com/metanova-labs/nova.git third_party/nova
+git -C third_party/nova sparse-checkout set external_tools/boltz
+```
+
+Install Boltz dependencies (optional, required for real Boltz scoring):
+
+```bash
+pip install -r third_party/nova/external_tools/boltz/requirements.txt
+```
+
+## Configure Search Space
+
+Set one reaction type and fixed params in `config.yaml`:
+
+```yaml
+search:
+  rxn: 2
+  fixed_params:
+    1: 166916
+  batch_size: 60
+```
+
+Examples:
+- `rxn:2` with `fixed_params {1: 166916}` means search `rxn2:p1=166916:p2=?`.
+- `rxn:3` with `fixed_params {1: 166916}` means 2D search `rxn3:p1=166916:p2=?,p3=?`.
+- `rxn:3` with `fixed_params {1: 166916, 2: 113926}` means 1D search `rxn3:p1=166916:p2=113926:p3=?`.
+
+## Run Commands
+
+Dry run (no Boltz-2 scoring):
+
+```bash
+python -m molsearch.cli dry-run --config config.yaml
+```
+
+Full scoring iteration:
+
+```bash
+python -m molsearch.cli run --config config.yaml
+```
+
+Inspect filtered candidates:
+
+```bash
+python -m molsearch.cli candidates --config config.yaml
+```
+
+Show best historical scores:
+
+```bash
+python -m molsearch.cli best --config config.yaml --top 20
+```
+
+## Selection Strategy
+
+Per iteration (default batch size 60):
+- 40 exploit: highest predicted scores
+- 15 UCB: highest `pred + beta * uncertainty (+ novelty)`
+- 5 explore: diverse sample for coverage
+
+Default acquisition:
+
+```python
+acquisition = predicted_score + beta * uncertainty + novelty_bonus
+```
+
+Default `beta = 1.2`.
+
+If historical data is insufficient (`min_training_rows`), selector falls back to diverse sampling across free parameters.
+
+## Features
+
+Modeling uses:
+- parsed reaction params: `rxn, p1, p2, p3`
+- hashed `molecule_id` features
+- hashed `SMILES` features
+- simple SMILES descriptors (`length`, atom-like count, ring estimate, branch estimate)
+- optional RDKit Morgan fingerprints
+
+Default model: `ExtraTreesRegressor` with per-tree prediction std as uncertainty.
+Optional model: CatBoost (if installed).
+
+## Scoring Integration
+
+`BoltzScorer` supports:
+- `mock` mode: deterministic pseudo-score (fast for tests)
+- `command` mode: runs external scorer command from `command_template`
+- `command` mode requires `scoring.target` in `config.yaml`
+
+Example target-aware scoring config:
+
+```yaml
+scoring:
+  mode: "command"
+  command_template: "env BOLTZ_CACHE=data/boltz-cache python score_boltz2.py --smiles '{smiles}' --molecule-id '{molecule_id}' --target-json '{target_json}'"
+  target:
+    name: "example_target"
+    sequence: "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQANL"
+  timeout_seconds: 3600
+  mock_score: false
+```
+
+Template variables available in `command_template`:
+- `{molecule_id}`, `{smiles}`
+- `{target_json}` (full target object as JSON string)
+- flattened target fields like `{target_name}`, `{target_sequence}`, `{target_chain_id}` for nested keys
+
+`score_boltz2.py` supports:
+- real Boltz scoring if `boltz` package/CLI is installed
+- deterministic fallback (`--mock`) for quick testing
+- local cache override via `BOLTZ_CACHE` (recommended: `data/boltz-cache`)
+
+Accepted command output examples:
+- `score: 0.123`
+- `SCORE=0.123`
+- JSON like `{"score": 0.123}`
+
+Failed scoring rows are stored with `NaN` score and do not crash the run.
+
+## Result Files and Safety
+
+My result schema:
+
+```csv
+molecule_id,final_score
+```
+
+Save behavior:
+1. write new rows to reaction file like `my_results_rxn1.csv`
+2. append/update the configured origin history file
+3. drop duplicate molecule IDs (keep latest)
+4. sort by `final_score` descending with NaN at bottom
+5. writes are atomic (`.tmp` then replace)
+
+This guarantees previously scored molecule IDs are not selected again.
+
+## Database Column Detection
+
+SQLite schema is auto-detected:
+- molecule ID column candidates: `molecule_id`, `id`, `molecule`, `name`
+- SMILES column candidates: `smiles`, `SMILES`, `smile`
+
+If detection fails, error includes discovered tables/columns.
+
+Note: the current Hugging Face `molecules.sqlite` uses `mol_id` instead of `rxn:p1:p2:p3` IDs.  
+The pipeline handles this automatically and falls back to global search if rxn/p-parameter parsing is unavailable.
+
+## Tests
+
+```bash
+pytest
+```
+
+Covers:
+- molecule ID parsing
+- duplicate filtering by molecule ID and SMILES
+- selector output size and duplicate avoidance

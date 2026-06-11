@@ -1,0 +1,177 @@
+Metadata-Version: 2.4
+Name: molecule-active-search
+Version: 0.1.0
+Summary: Duplicate-aware anchored active search for compute-efficient molecule scoring
+Author: MolSearch
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.24
+Requires-Dist: pandas>=2.0
+Requires-Dist: PyYAML>=6.0
+Requires-Dist: scikit-learn>=1.3
+Provides-Extra: catboost
+Requires-Dist: catboost>=1.2; extra == "catboost"
+Provides-Extra: rdkit
+Requires-Dist: rdkit; extra == "rdkit"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4; extra == "dev"
+
+# Molecule Active Search
+
+Compute-efficient molecule search pipeline that prioritizes high-value candidates while minimizing expensive Boltz-2 scoring runs.
+
+## Goal
+
+Given a large `molecules.sqlite` pool, this project runs **Duplicate-Aware Anchored Active Search** to quickly find top-scoring molecules for a specific reaction family and fixed parameter setting.
+
+It avoids wasted compute by:
+- filtering to only the configured reaction/anchor parameters,
+- skipping already scored molecule IDs,
+- optionally skipping duplicate SMILES,
+- using active learning (exploit + UCB + exploration) rather than random search.
+
+## Project Layout
+
+- `config.yaml`: search/scoring/configuration
+- `data/molecules.sqlite`: source molecule database
+- `data/other_miners_results.csv`: origin/history results
+- `data/my_new_results.csv`: your new scored rows
+- `src/molsearch/`: pipeline implementation
+- `tests/`: unit tests
+
+## Installation
+
+```bash
+cd molecule-active-search
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .[dev]
+```
+
+Optional extras:
+
+```bash
+pip install -e .[catboost]
+pip install -e .[rdkit]
+```
+
+## Configure Search Space
+
+Set one reaction type and fixed params in `config.yaml`:
+
+```yaml
+search:
+  rxn: 2
+  fixed_params:
+    1: 166916
+  batch_size: 60
+```
+
+Examples:
+- `rxn:2` with `fixed_params {1: 166916}` means search `rxn2:p1=166916:p2=?`.
+- `rxn:3` with `fixed_params {1: 166916}` means 2D search `rxn3:p1=166916:p2=?,p3=?`.
+- `rxn:3` with `fixed_params {1: 166916, 2: 113926}` means 1D search `rxn3:p1=166916:p2=113926:p3=?`.
+
+## Run Commands
+
+Dry run (no Boltz-2 scoring):
+
+```bash
+python -m molsearch.cli dry-run --config config.yaml
+```
+
+Full scoring iteration:
+
+```bash
+python -m molsearch.cli run --config config.yaml
+```
+
+Inspect filtered candidates:
+
+```bash
+python -m molsearch.cli candidates --config config.yaml
+```
+
+Show best historical scores:
+
+```bash
+python -m molsearch.cli best --config config.yaml --top 20
+```
+
+## Selection Strategy
+
+Per iteration (default batch size 60):
+- 40 exploit: highest predicted scores
+- 15 UCB: highest `pred + beta * uncertainty (+ novelty)`
+- 5 explore: diverse sample for coverage
+
+Default acquisition:
+
+```python
+acquisition = predicted_score + beta * uncertainty + novelty_bonus
+```
+
+Default `beta = 1.2`.
+
+If historical data is insufficient (`min_training_rows`), selector falls back to diverse sampling across free parameters.
+
+## Features
+
+Modeling uses:
+- parsed reaction params: `rxn, p1, p2, p3`
+- hashed `molecule_id` features
+- hashed `SMILES` features
+- simple SMILES descriptors (`length`, atom-like count, ring estimate, branch estimate)
+- optional RDKit Morgan fingerprints
+
+Default model: `ExtraTreesRegressor` with per-tree prediction std as uncertainty.
+Optional model: CatBoost (if installed).
+
+## Scoring Integration
+
+`BoltzScorer` supports:
+- `mock` mode: deterministic pseudo-score (fast for tests)
+- `command` mode: runs external scorer command from `command_template`
+
+Accepted command output examples:
+- `score: 0.123`
+- `SCORE=0.123`
+- JSON like `{"score": 0.123}`
+
+Failed scoring rows are stored with `NaN` score and do not crash the run.
+
+## Result Files and Safety
+
+Result schema:
+
+```csv
+molecule_id,rxn,p1,p2,p3,smiles,score,pred_score,uncertainty,acquisition,source,iteration,created_at
+```
+
+Save behavior:
+1. write new rows to `my_new_results.csv`
+2. append/update `other_miners_results.csv`
+3. drop duplicate molecule IDs (keep latest)
+4. sort by score descending with NaN at bottom
+5. writes are atomic (`.tmp` then replace)
+
+This guarantees previously scored molecule IDs are not selected again.
+
+## Database Column Detection
+
+SQLite schema is auto-detected:
+- molecule ID column candidates: `molecule_id`, `id`, `molecule`, `name`
+- SMILES column candidates: `smiles`, `SMILES`, `smile`
+
+If detection fails, error includes discovered tables/columns.
+
+## Tests
+
+```bash
+pytest
+```
+
+Covers:
+- molecule ID parsing
+- duplicate filtering by molecule ID and SMILES
+- selector output size and duplicate avoidance
