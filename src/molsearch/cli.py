@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Molecule Active Search CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run_p = sub.add_parser("run", help="Run one full iteration")
+    run_p = sub.add_parser("run", help="Run iterative active search until convergence")
     run_p.add_argument("--config", required=True)
     run_p.set_defaults(func=_cmd_run)
 

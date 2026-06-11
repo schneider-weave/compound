@@ -56,6 +56,15 @@ class ResultsConfig:
 
 
 @dataclass(slots=True)
+class RunControlConfig:
+    enabled: bool
+    patience: int
+    max_iterations: int
+    min_avg_improvement: float
+    min_best_improvement: float
+
+
+@dataclass(slots=True)
 class AppConfig:
     search: SearchConfig
     files: FilesConfig
@@ -63,6 +72,7 @@ class AppConfig:
     selection: SelectionConfig
     scoring: ScoringConfig
     results: ResultsConfig
+    run_control: RunControlConfig
 
 
 def _require(mapping: dict[str, Any], key: str) -> Any:
@@ -89,6 +99,7 @@ def load_config(config_path: str | Path) -> AppConfig:
     selection_raw = _require(cfg, "selection")
     scoring_raw = _require(cfg, "scoring")
     results_raw = _require(cfg, "results")
+    run_control_raw = cfg.get("run_control", {})
 
     root = path.parent
     rxn_value = int(_require(search_raw, "rxn"))
@@ -135,5 +146,12 @@ def load_config(config_path: str | Path) -> AppConfig:
         results=ResultsConfig(
             sort_by=str(results_raw.get("sort_by", "score")),
             sort_order=str(results_raw.get("sort_order", "desc")),
+        ),
+        run_control=RunControlConfig(
+            enabled=bool(run_control_raw.get("enabled", True)),
+            patience=int(run_control_raw.get("patience", 5)),
+            max_iterations=int(run_control_raw.get("max_iterations", 100)),
+            min_avg_improvement=float(run_control_raw.get("min_avg_improvement", 0.0)),
+            min_best_improvement=float(run_control_raw.get("min_best_improvement", 0.0)),
         ),
     )

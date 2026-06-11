@@ -158,6 +158,7 @@ def _score_batch(selected: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
 
 def _print_summary(
     cfg: AppConfig,
+    iteration: int,
     candidate_pool_size: int,
     selected_count: int,
     scored_df: pd.DataFrame,
@@ -170,6 +171,7 @@ def _print_summary(
 
     fixed = ", ".join([f"p{k}={v}" for k, v in cfg.search.fixed_params.items()]) or "none"
 
+    print(f"Iteration: {iteration}")
     print(f"Reaction type: rxn{cfg.search.rxn}")
     print(f"Fixed params: {fixed}")
     print(f"Candidate pool size: {candidate_pool_size}")
@@ -190,8 +192,8 @@ def _print_summary(
         )
 
 
-def run_iteration(config_path: str, dry_run: bool = False) -> pd.DataFrame:
-    cfg = load_config(config_path)
+def _run_single_iteration(cfg: AppConfig, iteration: int, dry_run: bool = False) -> pd.DataFrame:
+    cfg.search.iteration = iteration
 
     candidates, history_df = _prepare_candidates(cfg)
     selected = select_batch(candidates, history_df, cfg)
@@ -222,6 +224,7 @@ def run_iteration(config_path: str, dry_run: bool = False) -> pd.DataFrame:
 
     _print_summary(
         cfg,
+        iteration=iteration,
         candidate_pool_size=len(candidates),
         selected_count=len(selected),
         scored_df=scored_df,
@@ -229,6 +232,62 @@ def run_iteration(config_path: str, dry_run: bool = False) -> pd.DataFrame:
     )
 
     return scored_df
+
+
+def run_iteration(config_path: str, dry_run: bool = False) -> pd.DataFrame:
+    cfg = load_config(config_path)
+    if dry_run or not cfg.run_control.enabled:
+        return _run_single_iteration(cfg, iteration=cfg.search.iteration, dry_run=dry_run)
+
+    start_iter = cfg.search.iteration
+    patience = max(cfg.run_control.patience, 1)
+    max_iterations = max(cfg.run_control.max_iterations, 1)
+    no_improve_streak = 0
+    last_avg = -np.inf
+    last_best = -np.inf
+    last_scored = pd.DataFrame()
+
+    for i in range(max_iterations):
+        iteration = start_iter + i
+        scored_df = _run_single_iteration(cfg, iteration=iteration, dry_run=False)
+        last_scored = scored_df
+
+        valid_scores = pd.to_numeric(scored_df.get("final_score"), errors="coerce").dropna()
+        iter_avg = float(valid_scores.mean()) if not valid_scores.empty else -np.inf
+        iter_best = float(valid_scores.max()) if not valid_scores.empty else -np.inf
+
+        avg_improved = (iter_avg - last_avg) > cfg.run_control.min_avg_improvement
+        best_improved = (iter_best - last_best) > cfg.run_control.min_best_improvement
+
+        if avg_improved:
+            last_avg = iter_avg
+        if best_improved:
+            last_best = iter_best
+
+        if not avg_improved and not best_improved:
+            no_improve_streak += 1
+        else:
+            no_improve_streak = 0
+
+        print(
+            "Convergence status: "
+            f"avg_improved={avg_improved}, best_improved={best_improved}, "
+            f"no_improve_streak={no_improve_streak}/{patience}"
+        )
+
+        if no_improve_streak >= patience:
+            print(
+                f"Early stop triggered after {patience} stagnant iterations "
+                "(no avg-score improvement and no new top molecule)."
+            )
+            break
+
+        candidates_left = len(list_candidates(config_path))
+        if candidates_left == 0:
+            print("Stopping because candidate pool is exhausted.")
+            break
+
+    return last_scored
 
 
 def show_best(config_path: str, top_n: int) -> pd.DataFrame:
