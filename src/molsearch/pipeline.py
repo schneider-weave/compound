@@ -181,7 +181,10 @@ def _pool_entropy(selected: pd.DataFrame) -> float:
             return 0.0
         probs = selected["smiles"].astype(str).value_counts(normalize=True)
     else:
-        tuples = selected[param_cols].astype(str).agg("|".join, axis=1)
+        tuples = selected[param_cols].apply(
+            lambda row: "|".join(str(v) for v in row.tolist()),
+            axis=1,
+        )
         probs = tuples.value_counts(normalize=True)
     if probs.empty:
         return 0.0
