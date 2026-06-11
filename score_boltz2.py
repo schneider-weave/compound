@@ -135,7 +135,14 @@ def _mock_score(molecule_id: str, smiles: str, target_name: str) -> float:
 
 def _load_target(args: argparse.Namespace) -> dict[str, Any]:
     if args.target_json:
-        parsed = json.loads(args.target_json)
+        try:
+            parsed = json.loads(args.target_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"--target-json is invalid JSON ({exc}). "
+                "Check shell quoting, or pass "
+                "--target-name NAME --target-sequence SEQ instead."
+            ) from exc
         if not isinstance(parsed, dict):
             raise ValueError("--target-json must decode to an object")
         return parsed

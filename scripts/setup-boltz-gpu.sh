@@ -57,4 +57,5 @@ echo "  cd $ROOT"
 echo '  env BOLTZ_CACHE=data/boltz-cache python3 score_boltz2.py --strict \'
 echo '    --smiles "NC(c1cn(I)nn1)c1cccs1" \'
 echo '    --molecule-id "rxn:1:60111:39851" \'
-echo '    --target-json '"'"'{"name":"example_target","sequence":"MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQANL}'"'"
+echo '    --target-name example_target \'
+echo '    --target-sequence MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQANL'
