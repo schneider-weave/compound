@@ -141,12 +141,4 @@ class BoltzScorer:
             except ValueError:
                 continue
 
-        # Last resort: find the last standalone numeric token.
-        numbers = re.findall(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", text)
-        if numbers:
-            try:
-                return float(numbers[-1])
-            except ValueError:
-                return math.nan
-
         return math.nan

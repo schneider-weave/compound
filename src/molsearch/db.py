@@ -52,8 +52,10 @@ def load_molecules(sqlite_path: str | Path) -> pd.DataFrame:
             raise ValueError(f"No tables found in SQLite database: {path}")
 
         table, mol_col, smiles_col = _find_best_table(conn, tables)
+        cols = _table_columns(conn, table)
+        role_expr = "role_mask" if "role_mask" in cols else "NULL AS role_mask"
         df = pd.read_sql_query(
-            f"SELECT {mol_col} AS molecule_id, {smiles_col} AS smiles FROM '{table}'",
+            f"SELECT {mol_col} AS molecule_id, {smiles_col} AS smiles, {role_expr} FROM '{table}'",
             conn,
         )
     finally:
@@ -65,3 +67,38 @@ def load_molecules(sqlite_path: str | Path) -> pd.DataFrame:
     df["molecule_id"] = df["molecule_id"].astype(str)
     df["smiles"] = df["smiles"].astype(str)
     return df
+
+
+def load_reaction_roles(sqlite_path: str | Path) -> dict[int, tuple[int, ...]]:
+    path = Path(sqlite_path)
+    if not path.exists():
+        return {}
+
+    conn = sqlite3.connect(path)
+    try:
+        tables = set(_list_tables(conn))
+        if "reactions" not in tables:
+            return {}
+
+        cols = set(_table_columns(conn, "reactions"))
+        needed = {"rxn_id", "roleA", "roleB"}
+        if not needed.issubset(cols):
+            return {}
+
+        role_c_expr = "roleC" if "roleC" in cols else "NULL AS roleC"
+        rows = conn.execute(
+            f"SELECT rxn_id, roleA, roleB, {role_c_expr} FROM reactions"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out: dict[int, tuple[int, ...]] = {}
+    for rxn_id, role_a, role_b, role_c in rows:
+        try:
+            rxn = int(rxn_id)
+            roles = tuple(int(v) for v in [role_a, role_b, role_c] if v is not None)
+        except Exception:
+            continue
+        if roles:
+            out[rxn] = roles
+    return out

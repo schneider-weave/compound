@@ -48,3 +48,11 @@ def test_extract_score_from_noisy_output_prefers_labeled_score() -> None:
 def test_extract_score_from_nested_json_affinity_key() -> None:
     output = '{"result": {"affinity_pred_value": 1.2345, "other": 0}}'
     assert BoltzScorer._extract_score(output) == 1.2345
+
+
+def test_extract_score_does_not_use_progress_percent_as_score() -> None:
+    output = """
+    100%|██████████| 150/150 [elapsed: 00:08 remaining: 00:00]
+    Boltz scoring error: Command returned non-zero exit status 1.
+    """
+    assert math.isnan(BoltzScorer._extract_score(output))

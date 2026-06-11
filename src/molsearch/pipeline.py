@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from .config import AppConfig, load_config
-from .db import load_molecules
+from .db import load_molecules, load_reaction_roles
 from .history import (
     filter_seen_candidates,
     load_history,
@@ -61,10 +61,6 @@ def _normalize_results_file_ids(path: Path, cfg: AppConfig) -> None:
 
 def _apply_search_filter(df: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
     if "rxn" not in df.columns or df["rxn"].dropna().empty:
-        print(
-            "Warning: molecule IDs in this dataset do not encode rxn/p-parameters. "
-            "Skipping rxn/fixed parameter filtering and using all rows."
-        )
         return df.reset_index(drop=True)
 
     out = df[df["rxn"] == cfg.search.rxn].copy()
@@ -82,10 +78,153 @@ def _apply_search_filter(df: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
+def _build_role_based_candidates(
+    molecules_df: pd.DataFrame,
+    cfg: AppConfig,
+    reaction_roles: dict[int, tuple[int, ...]],
+) -> pd.DataFrame | None:
+    if "role_mask" not in molecules_df.columns:
+        return None
+
+    roles = reaction_roles.get(cfg.search.rxn)
+    if not roles:
+        return None
+
+    role_by_param_idx = {idx + 1: role for idx, role in enumerate(roles)}
+    free_param_idxs = [idx for idx in role_by_param_idx if idx not in cfg.search.fixed_params]
+    if not free_param_idxs:
+        print(
+            "Warning: all reaction params are fixed, so there is no free parameter to search. "
+            "Using all rows."
+        )
+        return None
+
+    if len(free_param_idxs) > 2:
+        print(
+            "Warning: role-based fallback supports up to 2 free parameters. "
+            f"rxn{cfg.search.rxn} currently has free params={free_param_idxs}. "
+            "Using all rows."
+        )
+        return None
+
+    role_mask_series = pd.to_numeric(molecules_df["role_mask"], errors="coerce").fillna(0).astype(int)
+
+    free_pools: dict[int, pd.DataFrame] = {}
+    for free_idx in free_param_idxs:
+        free_role = role_by_param_idx[free_idx]
+        pool = molecules_df[(role_mask_series & int(free_role)) != 0].copy()
+        if pool.empty:
+            return pool
+        pool["molecule_id_num"] = pd.to_numeric(pool["molecule_id"], errors="coerce")
+        pool = pool[pool["molecule_id_num"].notna()].copy()
+        pool["molecule_id_num"] = pool["molecule_id_num"].astype(int)
+        pool = pool.drop_duplicates(subset=["molecule_id_num"], keep="first").reset_index(drop=True)
+        free_pools[free_idx] = pool
+
+    if len(free_param_idxs) == 1:
+        free_idx = free_param_idxs[0]
+        pool = free_pools[free_idx]
+        candidates = pool.copy()
+        free_values = candidates["molecule_id_num"]
+        smiles_values = candidates["smiles"].astype(str)
+    else:
+        left_idx, right_idx = sorted(free_param_idxs)
+        left = free_pools[left_idx]
+        right = free_pools[right_idx]
+        left_n = len(left)
+        right_n = len(right)
+        total_combinations = left_n * right_n
+        batch_size = int(getattr(cfg.search, "batch_size", 60))
+        max_combinations = max(batch_size * 300, 60000)
+        seed = int(getattr(getattr(cfg, "selection", object()), "random_seed", 42))
+        rng = np.random.default_rng(seed)
+
+        if total_combinations <= max_combinations:
+            li, ri = np.indices((left_n, right_n))
+            li = li.reshape(-1)
+            ri = ri.reshape(-1)
+        else:
+            sampled_pairs: set[tuple[int, int]] = set()
+            attempts = 0
+            max_attempts = max_combinations * 30
+            while len(sampled_pairs) < max_combinations and attempts < max_attempts:
+                sampled_pairs.add((int(rng.integers(0, left_n)), int(rng.integers(0, right_n))))
+                attempts += 1
+            if not sampled_pairs:
+                return pd.DataFrame(columns=["molecule_id", "smiles"])
+            li = np.array([p[0] for p in sampled_pairs], dtype=int)
+            ri = np.array([p[1] for p in sampled_pairs], dtype=int)
+
+        left_vals = left["molecule_id_num"].to_numpy()
+        right_vals = right["molecule_id_num"].to_numpy()
+        left_smiles = left["smiles"].astype(str).to_numpy()
+        right_smiles = right["smiles"].astype(str).to_numpy()
+
+        combo_df = pd.DataFrame(
+            {
+                f"p{left_idx}": left_vals[li],
+                f"p{right_idx}": right_vals[ri],
+                "_smiles_left": left_smiles[li],
+                "_smiles_right": right_smiles[ri],
+            }
+        )
+        combo_df = combo_df.drop_duplicates(subset=[f"p{left_idx}", f"p{right_idx}"], keep="first")
+        candidates = combo_df.reset_index(drop=True)
+        smiles_values = candidates["_smiles_left"] + "." + candidates["_smiles_right"]
+
+    params: dict[int, pd.Series | int | float] = {}
+    max_param = max(role_by_param_idx)
+    series_index = candidates.index
+    for idx in range(1, max_param + 1):
+        if idx in free_param_idxs:
+            if len(free_param_idxs) == 1:
+                params[idx] = pd.Series(free_values.to_numpy(), index=series_index)
+            else:
+                params[idx] = pd.to_numeric(candidates[f"p{idx}"], errors="coerce").fillna(-1).astype(int)
+        elif idx in cfg.search.fixed_params:
+            params[idx] = int(cfg.search.fixed_params[idx])
+        else:
+            params[idx] = np.nan
+
+    if max_param == 2:
+        candidates["molecule_id"] = (
+            f"rxn:{cfg.search.rxn}:"
+            + pd.Series(params[1], index=series_index).astype(int).astype(str)
+            + ":"
+            + pd.Series(params[2], index=series_index).astype(int).astype(str)
+        )
+    else:
+        candidates["molecule_id"] = (
+            f"rxn:{cfg.search.rxn}:"
+            + pd.Series(params[1], index=series_index).astype(int).astype(str)
+            + ":"
+            + pd.Series(params[2], index=series_index).astype(int).astype(str)
+            + ":"
+            + pd.Series(params[3], index=series_index).astype(int).astype(str)
+        )
+    candidates["smiles"] = pd.Series(smiles_values, index=series_index).astype(str)
+
+    return candidates[["molecule_id", "smiles"]].reset_index(drop=True)
+
+
 def _prepare_candidates(cfg: AppConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
     molecules = load_molecules(cfg.files.molecules_sqlite)
     parsed = add_parsed_columns(molecules)
     filtered = _apply_search_filter(parsed, cfg)
+    if "rxn" not in parsed.columns or parsed["rxn"].dropna().empty:
+        reaction_roles = load_reaction_roles(cfg.files.molecules_sqlite)
+        role_based = _build_role_based_candidates(molecules, cfg, reaction_roles)
+        if role_based is not None:
+            filtered = role_based
+            print(
+                "Info: molecule IDs are not rxn-encoded; "
+                f"using role_mask-based fallback for rxn{cfg.search.rxn}."
+            )
+        else:
+            print(
+                "Warning: molecule IDs in this dataset do not encode rxn/p-parameters. "
+                "Skipping rxn/fixed parameter filtering and using all rows."
+            )
     filtered = filtered.copy()
     filtered["molecule_id"] = filtered["molecule_id"].astype(str).apply(
         lambda x: _canonicalize_molecule_id(x, cfg)
