@@ -47,6 +47,9 @@ class ScoringConfig:
     timeout_seconds: int
     mock_score: bool
     target: dict[str, Any]
+    strict_scoring: bool = True
+    history_require_smiles: bool = True
+    history_max_score: float | None = None
 
 
 @dataclass(slots=True)
@@ -142,6 +145,13 @@ def load_config(config_path: str | Path) -> AppConfig:
             timeout_seconds=int(scoring_raw.get("timeout_seconds", 3600)),
             mock_score=bool(scoring_raw.get("mock_score", False)),
             target=dict(scoring_raw.get("target", {})),
+            strict_scoring=bool(scoring_raw.get("strict_scoring", True)),
+            history_require_smiles=bool(scoring_raw.get("history_require_smiles", True)),
+            history_max_score=(
+                float(scoring_raw["history_max_score"])
+                if scoring_raw.get("history_max_score") is not None
+                else None
+            ),
         ),
         results=ResultsConfig(
             sort_by=str(results_raw.get("sort_by", "score")),

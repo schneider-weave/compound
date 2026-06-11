@@ -116,6 +116,11 @@ def main() -> int:
     parser.add_argument("--target-sequence", default="")
     parser.add_argument("--target-json", default="")
     parser.add_argument("--mock", action="store_true")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail without emitting a score when Boltz inference fails.",
+    )
     args = parser.parse_args()
 
     target = _load_target(args)
@@ -144,9 +149,10 @@ def main() -> int:
             print(f"score: {score:.6f}")
             return 0
     except Exception as exc:
-        # Keep the search pipeline moving by emitting a deterministic fallback score.
-        fallback = _mock_score(args.molecule_id, args.smiles, target_name)
         print(f"Boltz scoring error: {exc}", file=sys.stderr)
+        if args.strict:
+            return 2
+        fallback = _mock_score(args.molecule_id, args.smiles, target_name)
         print("Falling back to deterministic mock score.", file=sys.stderr)
         print(f"score: {fallback:.6f}")
         return 0

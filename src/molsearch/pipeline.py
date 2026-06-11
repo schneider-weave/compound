@@ -10,6 +10,7 @@ from .config import AppConfig, load_config
 from .db import load_molecules, load_reaction_roles
 from .history import (
     filter_seen_candidates,
+    filter_valid_history,
     load_history,
     save_iteration_results,
     top_results,
@@ -207,7 +208,15 @@ def _build_role_based_candidates(
     return candidates[["molecule_id", "smiles"]].reset_index(drop=True)
 
 
-def _prepare_candidates(cfg: AppConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _training_history(cfg: AppConfig, history_df: pd.DataFrame) -> pd.DataFrame:
+    return filter_valid_history(
+        history_df,
+        require_smiles=cfg.scoring.history_require_smiles,
+        max_score=cfg.scoring.history_max_score,
+    )
+
+
+def _prepare_candidates(cfg: AppConfig) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     molecules = load_molecules(cfg.files.molecules_sqlite)
     parsed = add_parsed_columns(molecules)
     filtered = _apply_search_filter(parsed, cfg)
@@ -244,12 +253,13 @@ def _prepare_candidates(cfg: AppConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
     )
 
     clean = clean.drop_duplicates(subset=["molecule_id"], keep="first").reset_index(drop=True)
-    return clean, history_df
+    training_history = _training_history(cfg, history_df)
+    return clean, history_df, training_history
 
 
 def list_candidates(config_path: str) -> pd.DataFrame:
     cfg = load_config(config_path)
-    candidates, _ = _prepare_candidates(cfg)
+    candidates, _, _ = _prepare_candidates(cfg)
     return candidates
 
 
@@ -265,6 +275,7 @@ def _score_batch(selected: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
         timeout_seconds=cfg.scoring.timeout_seconds,
         mock_score=cfg.scoring.mock_score,
         target=cfg.scoring.target,
+        strict_scoring=cfg.scoring.strict_scoring and not cfg.scoring.mock_score,
     )
 
     rows = []
@@ -353,7 +364,7 @@ def _print_iteration_progress(
     avg, max_v, ent = _pool_score_stats(selected)
     print(
         f"Iteration {iteration} | {iteration_elapsed_sec:.1f}s | Total: {int(total_elapsed_sec)}s "
-        f"| Mode: {_mode_label(cfg)} | Pool: avg={avg:.4f} max={max_v:.4f} ent={ent:.3f}"
+        f"| Mode: {_mode_label(cfg)} | Pool: pred_avg={avg:.4f} pred_max={max_v:.4f} ent={ent:.3f}"
     )
 
 
@@ -365,10 +376,22 @@ def _print_summary(
     scored_df: pd.DataFrame,
     origin_df: pd.DataFrame,
 ) -> None:
-    failed = int(scored_df["final_score"].isna().sum()) if not scored_df.empty else 0
+    valid_scores = (
+        pd.to_numeric(scored_df.get("final_score"), errors="coerce").dropna()
+        if not scored_df.empty
+        else pd.Series(dtype=float)
+    )
+    failed = int(len(scored_df) - len(valid_scores)) if not scored_df.empty else 0
 
     iter_best = scored_df.sort_values(by="final_score", ascending=False, na_position="last").head(1)
-    overall_best = origin_df.sort_values(by="final_score", ascending=False, na_position="last").head(1)
+    validated_origin = filter_valid_history(
+        origin_df,
+        require_smiles=cfg.scoring.history_require_smiles,
+        max_score=cfg.scoring.history_max_score,
+    )
+    overall_best = validated_origin.sort_values(
+        by="final_score", ascending=False, na_position="last"
+    ).head(1)
 
     fixed = ", ".join([f"p{k}={v}" for k, v in cfg.search.fixed_params.items()]) or "none"
 
@@ -380,15 +403,23 @@ def _print_summary(
     print(f"Scored count: {len(scored_df)}")
     print(f"Failed count: {failed}")
 
+    if not valid_scores.empty:
+        print(
+            "Scored this iteration: "
+            f"scored_avg={float(valid_scores.mean()):.4f} scored_max={float(valid_scores.max()):.4f}"
+        )
+
     if not iter_best.empty and pd.notna(iter_best.iloc[0]["final_score"]):
         print(
-            "Best this iteration: "
+            "Best this iteration (scored): "
             f"{iter_best.iloc[0]['molecule_id']} score={iter_best.iloc[0]['final_score']}"
         )
+    elif failed > 0:
+        print("Best this iteration (scored): none (all scoring failed)")
 
     if not overall_best.empty and pd.notna(overall_best.iloc[0]["final_score"]):
         print(
-            "Best overall: "
+            "Best overall (validated history): "
             f"{overall_best.iloc[0]['molecule_id']} score={overall_best.iloc[0]['final_score']}"
         )
 
@@ -402,8 +433,8 @@ def _run_single_iteration(
     cfg.search.iteration = iteration
     iter_started_at = perf_counter()
 
-    candidates, history_df = _prepare_candidates(cfg)
-    selected = select_batch(candidates, history_df, cfg)
+    candidates, history_df, training_history = _prepare_candidates(cfg)
+    selected = select_batch(candidates, training_history, cfg)
 
     if dry_run:
         print(f"Dry run selected: {len(selected)}")

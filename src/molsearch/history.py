@@ -32,6 +32,30 @@ def load_results_csv(path: str | Path) -> pd.DataFrame:
     return df[CANONICAL_HISTORY_COLUMNS]
 
 
+def filter_valid_history(
+    history_df: pd.DataFrame,
+    require_smiles: bool = True,
+    max_score: float | None = None,
+) -> pd.DataFrame:
+    if history_df.empty:
+        return history_df.copy()
+
+    out = history_df.copy()
+    scores = pd.to_numeric(out.get("final_score", out.get("score")), errors="coerce")
+    out["final_score"] = scores
+    out["score"] = scores
+    out = out[scores.notna()]
+
+    if require_smiles and "smiles" in out.columns:
+        smiles = out["smiles"].astype(str).str.strip()
+        out = out[smiles.notna() & (smiles != "") & (smiles.str.lower() != "nan")]
+
+    if max_score is not None:
+        out = out[out["final_score"] <= float(max_score)]
+
+    return out.reset_index(drop=True)
+
+
 def load_history(origin_results: str | Path, my_new_results: str | Path) -> pd.DataFrame:
     origin_df = load_results_csv(origin_results)
     my_df = load_results_csv(my_new_results)
@@ -97,6 +121,7 @@ def save_iteration_results(
     if "final_score" not in normalized.columns:
         normalized["final_score"] = pd.to_numeric(normalized.get("score"), errors="coerce")
     normalized = normalized[MY_RESULTS_COLUMNS]
+    normalized = normalized.dropna(subset=["final_score"])
 
     merged = normalized if current.empty else pd.concat(
         [current[MY_RESULTS_COLUMNS], normalized],
@@ -124,6 +149,7 @@ def update_origin_results(
     if "final_score" not in normalized.columns:
         normalized["final_score"] = pd.to_numeric(normalized.get("score"), errors="coerce")
     normalized = normalized[MY_RESULTS_COLUMNS]
+    normalized = normalized.dropna(subset=["final_score"])
 
     for col in current_raw.columns:
         if col not in normalized.columns:

@@ -27,6 +27,7 @@ class BoltzScorer:
     timeout_seconds: int
     mock_score: bool = False
     target: dict[str, object] | None = None
+    strict_scoring: bool = True
 
     def score(self, molecule_id: str, smiles: str) -> float:
         if self.mock_score or self.mode.lower() == "mock":
@@ -43,6 +44,7 @@ class BoltzScorer:
             "smiles": smiles.replace("'", "\\'"),
             "molecule_id": molecule_id.replace("'", "\\'"),
             "target_json": json.dumps(target),
+            "strict_flag": "--strict" if self.strict_scoring else "",
         }
         format_values.update(self._flatten_target_values(target))
 
@@ -62,6 +64,11 @@ class BoltzScorer:
             return math.nan
 
         output = "\n".join([result.stdout or "", result.stderr or ""]).strip()
+        if self.strict_scoring:
+            if result.returncode != 0:
+                return math.nan
+            if "falling back to deterministic mock score" in output.lower():
+                return math.nan
         return self._extract_score(output)
 
     @staticmethod

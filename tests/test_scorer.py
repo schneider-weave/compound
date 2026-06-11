@@ -50,6 +50,18 @@ def test_extract_score_from_nested_json_affinity_key() -> None:
     assert BoltzScorer._extract_score(output) == 1.2345
 
 
+def test_strict_scoring_rejects_mock_fallback_output() -> None:
+    scorer = BoltzScorer(
+        mode="command",
+        command_template="python3 -c \"import sys; print('Falling back to deterministic mock score.', file=sys.stderr); print('score: 0.99')\"",
+        timeout_seconds=5,
+        mock_score=False,
+        target={"name": "t", "sequence": "ABC"},
+        strict_scoring=True,
+    )
+    assert math.isnan(scorer.score("rxn:2:1:2", "CCO"))
+
+
 def test_extract_score_does_not_use_progress_percent_as_score() -> None:
     output = """
     100%|██████████| 150/150 [elapsed: 00:08 remaining: 00:00]

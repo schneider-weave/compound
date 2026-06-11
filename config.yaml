@@ -26,12 +26,15 @@ selection:
 
 scoring:
   mode: "command"
-  command_template: "env BOLTZ_CACHE=data/boltz-cache python3 score_boltz2.py --smiles '{smiles}' --molecule-id '{molecule_id}' --target-json '{target_json}'"
+  command_template: "env BOLTZ_CACHE=data/boltz-cache python3 score_boltz2.py {strict_flag} --smiles '{smiles}' --molecule-id '{molecule_id}' --target-json '{target_json}'"
   target:
     name: "example_target"
     sequence: "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQANL"
   timeout_seconds: 3600
   mock_score: false
+  strict_scoring: true
+  history_require_smiles: true
+  history_max_score: null
 
 results:
   sort_by: "final_score"
