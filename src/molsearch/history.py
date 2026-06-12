@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 CANONICAL_HISTORY_COLUMNS = ["molecule_id", "smiles", "score", "final_score", "created_at"]
-MY_RESULTS_COLUMNS = ["molecule_id", "final_score"]
+MY_RESULTS_COLUMNS = ["molecule_id", "smiles", "final_score"]
 
 
 def _empty_results() -> pd.DataFrame:
@@ -120,6 +120,9 @@ def save_iteration_results(
     normalized = new_rows.copy()
     if "final_score" not in normalized.columns:
         normalized["final_score"] = pd.to_numeric(normalized.get("score"), errors="coerce")
+    for col in MY_RESULTS_COLUMNS:
+        if col not in normalized.columns:
+            normalized[col] = np.nan
     normalized = normalized[MY_RESULTS_COLUMNS]
     normalized = normalized.dropna(subset=["final_score"])
 
@@ -148,6 +151,9 @@ def update_origin_results(
     normalized = new_rows.copy()
     if "final_score" not in normalized.columns:
         normalized["final_score"] = pd.to_numeric(normalized.get("score"), errors="coerce")
+    for col in MY_RESULTS_COLUMNS:
+        if col not in normalized.columns:
+            normalized[col] = np.nan
     normalized = normalized[MY_RESULTS_COLUMNS]
     normalized = normalized.dropna(subset=["final_score"])
 

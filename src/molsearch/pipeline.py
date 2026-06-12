@@ -17,6 +17,7 @@ from .history import (
     update_origin_results,
 )
 from .molecule_id import add_parsed_columns
+from .reactions import get_smiles_from_reaction
 from .scorer import BoltzScorer
 from .selector import select_batch
 
@@ -79,6 +80,29 @@ def _apply_search_filter(df: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
+def _resolve_product_smiles(candidates: pd.DataFrame, db_path: Path) -> pd.DataFrame:
+    """Build product SMILES from rxn:molecule_id using the combinatorial DB (Nova validator logic)."""
+    rows: list[dict[str, str]] = []
+    skipped = 0
+    for _, row in candidates.iterrows():
+        molecule_id = str(row["molecule_id"])
+        if not molecule_id.startswith("rxn:"):
+            smiles = str(row.get("smiles", "")).strip()
+            if smiles and smiles.lower() != "nan":
+                rows.append({"molecule_id": molecule_id, "smiles": smiles})
+            else:
+                skipped += 1
+            continue
+        product_smiles = get_smiles_from_reaction(molecule_id, db_path)
+        if product_smiles:
+            rows.append({"molecule_id": molecule_id, "smiles": product_smiles})
+        else:
+            skipped += 1
+    if skipped:
+        print(f"Info: skipped {skipped} candidates with invalid combinatorial reactions.")
+    return pd.DataFrame(rows)
+
+
 def _build_role_based_candidates(
     molecules_df: pd.DataFrame,
     cfg: AppConfig,
@@ -127,7 +151,6 @@ def _build_role_based_candidates(
         pool = free_pools[free_idx]
         candidates = pool.copy()
         free_values = candidates["molecule_id_num"]
-        smiles_values = candidates["smiles"].astype(str)
     else:
         left_idx, right_idx = sorted(free_param_idxs)
         left = free_pools[left_idx]
@@ -152,26 +175,21 @@ def _build_role_based_candidates(
                 sampled_pairs.add((int(rng.integers(0, left_n)), int(rng.integers(0, right_n))))
                 attempts += 1
             if not sampled_pairs:
-                return pd.DataFrame(columns=["molecule_id", "smiles"])
+                return pd.DataFrame(columns=["molecule_id"])
             li = np.array([p[0] for p in sampled_pairs], dtype=int)
             ri = np.array([p[1] for p in sampled_pairs], dtype=int)
 
         left_vals = left["molecule_id_num"].to_numpy()
         right_vals = right["molecule_id_num"].to_numpy()
-        left_smiles = left["smiles"].astype(str).to_numpy()
-        right_smiles = right["smiles"].astype(str).to_numpy()
 
         combo_df = pd.DataFrame(
             {
                 f"p{left_idx}": left_vals[li],
                 f"p{right_idx}": right_vals[ri],
-                "_smiles_left": left_smiles[li],
-                "_smiles_right": right_smiles[ri],
             }
         )
         combo_df = combo_df.drop_duplicates(subset=[f"p{left_idx}", f"p{right_idx}"], keep="first")
         candidates = combo_df.reset_index(drop=True)
-        smiles_values = candidates["_smiles_left"] + "." + candidates["_smiles_right"]
 
     params: dict[int, pd.Series | int | float] = {}
     max_param = max(role_by_param_idx)
@@ -203,9 +221,8 @@ def _build_role_based_candidates(
             + ":"
             + pd.Series(params[3], index=series_index).astype(int).astype(str)
         )
-    candidates["smiles"] = pd.Series(smiles_values, index=series_index).astype(str)
 
-    return candidates[["molecule_id", "smiles"]].reset_index(drop=True)
+    return candidates[["molecule_id"]].reset_index(drop=True)
 
 
 def _training_history(cfg: AppConfig, history_df: pd.DataFrame) -> pd.DataFrame:
@@ -238,6 +255,11 @@ def _prepare_candidates(cfg: AppConfig) -> tuple[pd.DataFrame, pd.DataFrame, pd.
     filtered["molecule_id"] = filtered["molecule_id"].astype(str).apply(
         lambda x: _canonicalize_molecule_id(x, cfg)
     )
+    filtered = _resolve_product_smiles(filtered, cfg.files.molecules_sqlite)
+    if filtered.empty:
+        print("Warning: no candidates with valid product SMILES remain after combinatorial resolution.")
+        return filtered, history_df, _training_history(cfg, history_df)
+
     reparsed = add_parsed_columns(filtered[["molecule_id", "smiles"]])
     filtered["rxn"] = reparsed["rxn"]
     filtered["p1"] = reparsed["p1"]
@@ -290,7 +312,29 @@ def _score_batch(selected: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
 
     for _, row in iterator:
         molecule_id = str(row["molecule_id"])
-        smiles = str(row["smiles"])
+        smiles = get_smiles_from_reaction(molecule_id, cfg.files.molecules_sqlite)
+        if not smiles:
+            smiles = str(row.get("smiles", ""))
+        if not smiles or smiles.lower() == "nan":
+            rows.append(
+                {
+                    "molecule_id": molecule_id,
+                    "rxn": _to_int_or_nan(row.get("rxn")),
+                    "p1": _to_int_or_nan(row.get("p1")),
+                    "p2": _to_int_or_nan(row.get("p2")),
+                    "p3": _to_int_or_nan(row.get("p3")),
+                    "smiles": "",
+                    "score": float("nan"),
+                    "final_score": float("nan"),
+                    "pred_score": row.get("pred_score", np.nan),
+                    "uncertainty": row.get("uncertainty", np.nan),
+                    "acquisition": row.get("acquisition", np.nan),
+                    "source": "my_run",
+                    "iteration": cfg.search.iteration,
+                    "created_at": now,
+                }
+            )
+            continue
         score = scorer.score(molecule_id, smiles)
 
         rows.append(
