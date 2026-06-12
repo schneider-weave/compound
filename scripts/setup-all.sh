@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# End-to-end setup: venv, deps, data, Boltz, MSA, then optional run.
+# Environment setup only: venv, deps, data, Boltz, MSA.
+# Does NOT run the active-search pipeline — use scripts/run.sh for that.
+#
 # Usage:
-#   bash scripts/setup-all.sh              # setup only
-#   RUN=1 bash scripts/setup-all.sh        # setup + dry-run + score one iteration loop
-#   RUN=1 DRY_RUN_ONLY=1 bash scripts/setup-all.sh
+#   bash scripts/setup-all.sh
+#   SKIP_SMOKE_TEST=1 bash scripts/setup-all.sh   # skip single-molecule Boltz check
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -45,30 +46,23 @@ bash scripts/setup-boltz-gpu.sh
 step "Validator MSA"
 bash scripts/fetch-nova-msa.sh Q4QQW4
 
-step "Smoke-test score (validator final_score)"
-TARGET_SEQ="$(python3 - <<'PY'
+if [[ "${SKIP_SMOKE_TEST:-0}" != "1" ]]; then
+  step "Smoke-test score (verify Boltz env)"
+  TARGET_SEQ="$(python3 - <<'PY'
 import yaml
 print(yaml.safe_load(open("config.yaml"))["scoring"]["target"]["sequence"])
 PY
 )"
-env BOLTZ_CACHE=data/boltz-cache python3 score_boltz2.py --strict \
-  --smiles "CC1(C(=O)c2cn(I)nn2)COCC1N" \
-  --molecule-id "rxn:1:60111:2212" \
-  --target-name Q4QQW4 \
-  --target-sequence "$TARGET_SEQ"
-
-if [[ "${RUN:-0}" == "1" ]]; then
-  step "Active search dry-run"
-  python -m molsearch.cli dry-run --config config.yaml
-  if [[ "${DRY_RUN_ONLY:-0}" != "1" ]]; then
-    step "Active search run (generate + score)"
-    python -m molsearch.cli run --config config.yaml
-    step "Top results"
-    python -m molsearch.cli best --config config.yaml --top 20
-  fi
+  env BOLTZ_CACHE=data/boltz-cache python3 score_boltz2.py --strict \
+    --smiles "CC1(C(=O)c2cn(I)nn2)COCC1N" \
+    --molecule-id "rxn:1:60111:2212" \
+    --target-name Q4QQW4 \
+    --target-sequence "$TARGET_SEQ"
 fi
 
 echo
-echo "Setup complete. Project root: $ROOT"
+echo "Environment setup complete: $ROOT"
+echo
+echo "Next — run the pipeline:"
 echo "  source .venv/bin/activate"
-echo "  python -m molsearch.cli run --config config.yaml"
+echo "  bash scripts/run.sh"

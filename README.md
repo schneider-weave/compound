@@ -23,6 +23,29 @@ Compute-efficient molecule search for Nova subnet reactions **1, 2, and 4**. You
 - `src/molsearch/reactions.py` — SMILES from `molecule_id`
 - `score_boltz2.py` — Boltz CLI scorer (validator formula)
 
+## Quick Start (two steps)
+
+**Step 1 — clone + install environment** (venv, DB, Boltz, MSA):
+
+```bash
+git clone https://github.com/schneider-weave/compound.git molecule-active-search && \
+cd molecule-active-search && \
+bash scripts/setup-all.sh
+```
+
+**Step 2 — run pipeline** (select candidates + score):
+
+```bash
+source .venv/bin/activate
+bash scripts/run.sh
+```
+
+Selection only, no Boltz:
+
+```bash
+DRY_RUN_ONLY=1 bash scripts/run.sh
+```
+
 ## Installation
 
 ```bash
