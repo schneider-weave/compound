@@ -15,6 +15,11 @@ src/molsearch/molecule_id.py
 src/molsearch/pipeline.py
 src/molsearch/scorer.py
 src/molsearch/selector.py
+src/molsearch/validator_score.py
 tests/test_history.py
 tests/test_molecule_id.py
+tests/test_pipeline.py
+tests/test_pipeline_role_filter.py
+tests/test_scorer.py
 tests/test_selector.py
+tests/test_validator_score_alignment.py
