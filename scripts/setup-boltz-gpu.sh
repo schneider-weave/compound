@@ -20,10 +20,23 @@ pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
 echo "=== Step 2: install PyTorch with CUDA 12.8 (Blackwell / sm_120) ==="
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
-echo "=== Step 3: pin deps required by boltz 2.2.0 ==="
+echo "=== Step 3: install Boltz package + runtime dependencies ==="
+if [[ ! -d third_party/nova/external_tools/boltz/src/boltz ]]; then
+  echo "ERROR: Boltz source not found. Run:"
+  echo "  mkdir -p third_party"
+  echo "  git clone --filter=blob:none --sparse https://github.com/metanova-labs/nova.git third_party/nova"
+  echo "  git -C third_party/nova sparse-checkout set external_tools/boltz"
+  exit 1
+fi
+
+pip install -r third_party/nova/external_tools/boltz/requirements.txt
+pip install -r scripts/requirements-boltz-extra.txt
+pip install -e third_party/nova/external_tools/boltz
+
+echo "=== Step 4: pin deps required by boltz 2.2.0 ==="
 pip install --force-reinstall --no-deps numpy==1.26.4 scipy==1.13.1 numba==0.61.0
 
-echo "=== Step 4: verify GPU + checkpoint patch prerequisites ==="
+echo "=== Step 5: verify GPU + checkpoint patch prerequisites ==="
 python3 - <<'PY'
 import torch
 

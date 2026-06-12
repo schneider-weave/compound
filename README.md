@@ -156,15 +156,27 @@ Template variables available in `command_template`:
 - `{target_json}` (full target object as JSON string)
 - flattened target fields like `{target_name}`, `{target_sequence}`, `{target_chain_id}` for nested keys
 
-`score_boltz2.py` supports:
+`score_boltz2.py` outputs the **Nova validator `final_score`**, not raw Boltz
+`affinity_pred_value`. It applies the subnet formula:
+
+```text
+(affinity_probability_binary - affinity_pred_value) / heavy_atom_count
+```
+
+using Nova Boltz settings (`seed=68`, `sampling_steps=100`,
+`affinity_mw_correction=true`, etc.). Place optional MSA files at
+`data/msa_files/{target}.a3m` to match validator inputs; otherwise the MSA server
+is used.
+
+Supports:
 - real Boltz scoring if `boltz` package/CLI is installed
-- deterministic fallback (`--mock`) for quick testing
+- deterministic fallback (`--mock`) on the validator score scale
 - local cache override via `BOLTZ_CACHE` (recommended: `data/boltz-cache`)
 
 Accepted command output examples:
-- `score: 0.123`
-- `SCORE=0.123`
-- JSON like `{"score": 0.123}`
+- `score: 0.131500` (validator final_score)
+- `SCORE=0.131500`
+- JSON like `{"score": 0.131500}`
 
 Failed scoring rows are stored with `NaN` score and do not crash the run.
 

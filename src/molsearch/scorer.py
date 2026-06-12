@@ -97,6 +97,7 @@ class BoltzScorer:
         priority_keys = (
             "score",
             "final_score",
+            "validator_score",
             "affinity_pred_value",
             "affinity_probability_binary",
             "affinity_pred_value1",

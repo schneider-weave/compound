@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Score a single molecule with local Boltz and show validator-equivalent score."""
+"""Score a single molecule with Nova-validator-aligned Boltz scoring."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from molsearch.scorer import BoltzScorer  # noqa: E402
 from molsearch.validator_score import (  # noqa: E402
     get_heavy_atom_count,
-    local_boltz_score,
+    raw_affinity_pred_value,
     validator_boltz_score,
 )
 
@@ -25,22 +25,8 @@ DEFAULT_TARGET = {
         "MAQTQGTKRKVCYYYDGDVGNYYYGQGHPMKPHRIRMTHNLLLNYGLYRKMEIYRPHKANAEEMTKYHSDDYIKFLRSIRPDNMSEYSKQMQRFNVGEDCPVFDGLFEFCQLSTGGSVASAVKLNKQQTDIAVNWAGGLHHAKKSEASGFCYVNDIVLAILELLKYHQRVLYIDIDIHHGDGVEEAFYTTDRVMTVSFHKYGEYFPGTGDLRDIGAGKGKYYAVNYPLRDGIDDESYEAIFKPVMSKVMEMFQPSAVVLQCGSDSLSGDRLGCFNLTIKGHAKCVEFVKSFNLPMLMLGGGGYTIRNVARCWTYETAVALDTEIPNELPYNDYFEYFGPDFKLHISPSNMTNQNTNEYLEKIKQRLFENLRMLPHAPGVQMQAIPEDAIPEESGDEDEEDPDKRISICSSDKRIACEEEFSDSDEEGEGGRKNSSNFKKAKRVKTEDEKEKDPEEKKEVTEEEKTKEEKPEAKGVKEEVKMA"
     ),
 }
-DEFAULT_MOLECULE_ID = "rxn:3:61930:357:102046"
-DEFAULT_SMILES = "COc1ccsc1CNC(=O)[C@@H](CCSC)n1cc(-c2ccc(C)s2)nn1"
-
-
-def _load_metrics_from_boltz_output(output_dir: Path) -> dict[str, float]:
-    metrics: dict[str, float] = {}
-    for path in output_dir.rglob("*.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if isinstance(data, dict):
-            for key, value in data.items():
-                if isinstance(value, (int, float)):
-                    metrics[key] = float(value)
-    return metrics
+DEFAULT_MOLECULE_ID = "rxn:1:60111:2212"
+DEFAULT_SMILES = "CC1(C(=O)c2cn(I)nn2)COCC1N"
 
 
 def main() -> int:
@@ -57,29 +43,25 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    print("=== Molecule scoring comparison ===")
+    print("=== Nova validator molecule score ===")
     print(f"molecule_id: {args.molecule_id}")
     print(f"smiles:      {args.smiles}")
     print(f"target:      {args.target_name}")
     print()
 
     try:
-        heavy_atoms = get_heavy_atom_count(args.smiles)
-        print(f"heavy_atoms: {heavy_atoms}")
+        print(f"heavy_atoms: {get_heavy_atom_count(args.smiles)}")
     except Exception as exc:
         print(f"heavy_atoms: unavailable ({exc})")
-        heavy_atoms = None
 
     if args.metrics_json:
         metrics = json.loads(Path(args.metrics_json).read_text(encoding="utf-8"))
-        local = local_boltz_score(metrics)
-        validator = validator_boltz_score(metrics, args.smiles)
+        score = validator_boltz_score(metrics, args.smiles)
         print()
-        print("From saved Boltz metrics:")
-        print(f"  affinity_pred_value:          {metrics.get('affinity_pred_value')}")
-        print(f"  affinity_probability_binary:  {metrics.get('affinity_probability_binary')}")
-        print(f"  local score (this repo):      {local:.6f}")
-        print(f"  validator score (Nova):       {validator:.6f}")
+        print(f"affinity_probability_binary: {metrics.get('affinity_probability_binary')}")
+        print(f"affinity_pred_value:         {metrics.get('affinity_pred_value')}")
+        print(f"raw affinity_pred_value:     {raw_affinity_pred_value(metrics):.6f}")
+        print(f"validator score (Nova):      {score:.6f}")
         return 0
 
     target = {"name": args.target_name, "sequence": args.target_sequence}
@@ -109,17 +91,8 @@ def main() -> int:
         print("\nBoltz run failed. On GPU hosts, run scripts/setup-boltz-gpu.sh first.")
         return proc.returncode
 
-    local = BoltzScorer._extract_score(proc.stdout)
-    print(f"\nlocal score (this repo): {local:.6f}")
-
-    if args.mock:
-        print("mock mode: validator score requires real Boltz affinity JSON metrics")
-        return 0
-
-    print(
-        "\nTo compute validator score after a real run, pass the affinity JSON:\n"
-        "  python scripts/score_user_molecule.py --metrics-json path/to/affinity_*.json"
-    )
+    score = BoltzScorer._extract_score(proc.stdout)
+    print(f"\nvalidator score (Nova): {score:.6f}")
     return 0
 
 

@@ -13,6 +13,15 @@ from typing import Any
 
 import yaml
 
+_PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+
+from molsearch.validator_score import (  # noqa: E402
+    NOVA_BOLTZ_PREDICT_KWARGS,
+    extract_affinity_metrics_from_dir,
+    validator_boltz_score,
+)
+
 
 def _patch_torch_checkpoint_loaders() -> None:
     """Boltz/Lightning checkpoints need full pickle (omegaconf); PyTorch 2.6+ defaults to weights_only=True."""
@@ -68,13 +77,34 @@ def _prepare_torch_runtime() -> None:
 
 
 def _boltz_src_path() -> Path | None:
-    local_boltz_src = (
-        Path(__file__).resolve().parent / "third_party" / "nova" / "external_tools" / "boltz" / "src"
-    )
+    local_boltz_src = _PROJECT_ROOT / "third_party" / "nova" / "external_tools" / "boltz" / "src"
     return local_boltz_src if local_boltz_src.exists() else None
 
 
+def _missing_boltz_runtime_deps() -> list[str]:
+    missing: list[str] = []
+    for module, package in (
+        ("pytorch_lightning", "pytorch-lightning>=2.2,<3"),
+        ("omegaconf", "omegaconf>=2.3"),
+        ("hydra", "hydra-core==1.3.2"),
+    ):
+        try:
+            __import__(module)
+        except ImportError:
+            missing.append(package)
+    return missing
+
+
 def _import_boltz_predict() -> Any:
+    missing = _missing_boltz_runtime_deps()
+    if missing:
+        packages = " ".join(missing)
+        raise RuntimeError(
+            "Boltz runtime dependencies are missing. Install with:\n"
+            f"  pip install {packages}\n"
+            "Or run: pip install -r scripts/requirements-boltz-extra.txt"
+        )
+
     boltz_src = _boltz_src_path()
     if boltz_src is not None:
         sys.path.insert(0, str(boltz_src))
@@ -128,9 +158,18 @@ def _ensure_boltz_import_deps() -> None:
     sys.modules["bittensor"] = bt
 
 
-def _mock_score(molecule_id: str, smiles: str, target_name: str) -> float:
+def _mock_validator_score(molecule_id: str, smiles: str, target_name: str) -> float:
+    """Deterministic pseudo-score on the validator scale (for tests without GPU)."""
     digest = hashlib.sha256(f"{molecule_id}|{smiles}|{target_name}".encode("utf-8")).hexdigest()
-    return int(digest[:8], 16) / 0xFFFFFFFF
+    prob = int(digest[0:8], 16) / 0xFFFFFFFF
+    pred = -4.0 + (int(digest[8:16], 16) / 0xFFFFFFFF) * 5.0
+    return validator_boltz_score(
+        {
+            "affinity_probability_binary": prob,
+            "affinity_pred_value": pred,
+        },
+        smiles,
+    )
 
 
 def _load_target(args: argparse.Namespace) -> dict[str, Any]:
@@ -152,12 +191,22 @@ def _load_target(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _msa_path_for_target(target_name: str) -> Path | None:
+    path = _PROJECT_ROOT / "data" / "msa_files" / f"{target_name}.a3m"
+    return path if path.is_file() else None
+
+
 def _write_boltz_input(target_name: str, target_sequence: str, smiles: str, input_dir: Path) -> Path:
     input_path = input_dir / f"{target_name}.yaml"
+    protein: dict[str, object] = {"id": "A", "sequence": target_sequence}
+    msa_path = _msa_path_for_target(target_name)
+    if msa_path is not None:
+        protein["msa"] = str(msa_path)
+
     payload = {
         "version": 1,
         "sequences": [
-            {"protein": {"id": "A", "sequence": target_sequence}},
+            {"protein": protein},
             {"ligand": {"id": "B", "smiles": smiles}},
         ],
         "properties": [{"affinity": {"binder": "B"}}],
@@ -166,27 +215,15 @@ def _write_boltz_input(target_name: str, target_sequence: str, smiles: str, inpu
     return input_path
 
 
-def _extract_score_from_output_dir(out_dir: Path) -> float:
-    priority = [
-        "affinity_pred_value",
-        "affinity_probability_binary",
-        "affinity_pred_value1",
-        "affinity_probability_binary1",
-    ]
-    json_files = list(out_dir.rglob("*.json"))
-    for path in json_files:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if isinstance(data, dict):
-            for key in priority:
-                if key in data and isinstance(data[key], (int, float)):
-                    return float(data[key])
-    raise RuntimeError(f"Could not extract affinity score from Boltz outputs in {out_dir}")
+def _validator_score_from_output_dir(out_dir: Path, smiles: str) -> tuple[float, dict[str, float]]:
+    metrics = extract_affinity_metrics_from_dir(out_dir)
+    if not metrics:
+        raise RuntimeError(f"Could not extract Boltz affinity metrics from {out_dir}")
+    score = validator_boltz_score(metrics, smiles)
+    return score, metrics
 
 
-def _run_boltz_predict(input_dir: Path, output_dir: Path, cache_dir: str) -> None:
+def _run_boltz_predict(input_dir: Path, output_dir: Path, cache_dir: str, *, use_msa_server: bool) -> None:
     _ensure_boltz_import_deps()
     _prepare_torch_runtime()
     predict = _import_boltz_predict()
@@ -212,19 +249,21 @@ def _run_boltz_predict(input_dir: Path, output_dir: Path, cache_dir: str) -> Non
             data=str(input_dir),
             out_dir=str(output_dir),
             cache=cache_dir,
-            override=True,
             num_workers=0,
-            use_msa_server=True,
+            use_msa_server=use_msa_server,
             accelerator=accelerator,
             devices=1,
             no_kernels=(accelerator == "cpu"),
+            **NOVA_BOLTZ_PREDICT_KWARGS,
         )
     except Exception as exc:
         raise RuntimeError(f"boltz predict failed in python API: {exc}") from exc
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Boltz2 single-molecule scorer.")
+    parser = argparse.ArgumentParser(
+        description="Boltz2 single-molecule scorer (Nova validator final_score)."
+    )
     parser.add_argument("--smiles", required=True)
     parser.add_argument("--molecule-id", required=True)
     parser.add_argument("--target-name", default="")
@@ -246,7 +285,7 @@ def main() -> int:
     target_sequence = str(target.get("sequence", args.target_sequence or ""))
 
     if args.mock or not target_sequence:
-        score = _mock_score(args.molecule_id, args.smiles, target_name)
+        score = _mock_validator_score(args.molecule_id, args.smiles, target_name)
         print(f"score: {score:.6f}")
         return 0
 
@@ -260,18 +299,36 @@ def main() -> int:
             output_dir.mkdir(parents=True, exist_ok=True)
 
             _write_boltz_input(target_name, target_sequence, args.smiles, input_dir)
-            _run_boltz_predict(input_dir, output_dir, cache_dir)
-            score = _extract_score_from_output_dir(output_dir)
+            msa_path = _msa_path_for_target(target_name)
+            use_msa_server = msa_path is None
+            if use_msa_server:
+                print(
+                    f"No local MSA at data/msa_files/{target_name}.a3m; using MSA server.",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"Using local MSA: {msa_path}", file=sys.stderr)
+
+            _run_boltz_predict(input_dir, output_dir, cache_dir, use_msa_server=use_msa_server)
+            score, metrics = _validator_score_from_output_dir(output_dir, args.smiles)
             if not math.isfinite(score):
-                raise RuntimeError("Boltz score is not finite")
+                raise RuntimeError("Validator score is not finite")
+
+            prob = metrics.get("affinity_probability_binary")
+            pred = metrics.get("affinity_pred_value")
+            print(
+                f"validator_score: {score:.6f} "
+                f"(affinity_probability_binary={prob}, affinity_pred_value={pred})",
+                file=sys.stderr,
+            )
             print(f"score: {score:.6f}")
             return 0
     except Exception as exc:
         print(f"Boltz scoring error: {exc}", file=sys.stderr)
         if args.strict:
             return 2
-        fallback = _mock_score(args.molecule_id, args.smiles, target_name)
-        print("Falling back to deterministic mock score.", file=sys.stderr)
+        fallback = _mock_validator_score(args.molecule_id, args.smiles, target_name)
+        print("Falling back to deterministic mock validator score.", file=sys.stderr)
         print(f"score: {fallback:.6f}")
         return 0
 
