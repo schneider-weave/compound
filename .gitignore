@@ -12,3 +12,5 @@ data/*.tar
 # Local run outputs
 config.mock.yaml
 config.user-mock.yaml
+data/my_results_rxn*.csv
+data/nova_results_*.csv
